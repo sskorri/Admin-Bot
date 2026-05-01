@@ -1,2 +1,2 @@
 # Bot
-Discord bot built in JS
+Discord bot built in JS with basic features
